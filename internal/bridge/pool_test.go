@@ -205,3 +205,13 @@ func TestCallQoderContentPolicyNoFailover(t *testing.T) {
 		t.Fatalf("hits = %d, want 1 (no failover on content policy)", hits)
 	}
 }
+
+func TestNoAccountErrorMapsTo503(t *testing.T) {
+	if got := ErrorStatus(ErrNoAccount); got != 503 {
+		t.Errorf("ErrorStatus(ErrNoAccount) = %d, want 503", got)
+	}
+	msg, typ := FriendlyError(ErrNoAccount)
+	if typ != ErrTypeNoAccount || msg == "" {
+		t.Errorf("FriendlyError(ErrNoAccount) = (%q, %q)", msg, typ)
+	}
+}
