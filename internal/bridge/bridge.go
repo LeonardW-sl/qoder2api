@@ -419,6 +419,7 @@ func (b *Bridge) CallQoderWithOpts(ctx context.Context, agent string, messages [
 		if !ok {
 			break
 		}
+		logger.Info("callQoder: using account %s (%s)", slot.Name, slot.ID)
 		// 每个账号用全新的请求 id / session，避免跨账号复用同一标识
 		nid := cosy.NewUUID()
 		body["request_id"] = nid

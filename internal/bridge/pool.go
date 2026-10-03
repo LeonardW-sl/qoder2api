@@ -215,3 +215,35 @@ func CooldownFor(err error) time.Duration {
 	}
 	return CooldownTransient
 }
+
+// SlotStatus 是给控制台/运维看的账号池运行时状态。
+type SlotStatus struct {
+	ID                 string `json:"id"`
+	Name               string `json:"name"`
+	Region             string `json:"region"`
+	CoolingRemainingMS int64  `json:"cooling_remaining_ms"`
+	LastError          string `json:"last_error,omitempty"`
+}
+
+// Status 返回该账号的运行时状态。
+func (s *Slot) Status() SlotStatus {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var rem int64
+	if now := time.Now(); now.Before(s.cooldownUntil) {
+		rem = s.cooldownUntil.Sub(now).Milliseconds()
+	}
+	return SlotStatus{ID: s.ID, Name: s.Name, Region: string(s.Region), CoolingRemainingMS: rem, LastError: s.lastErr}
+}
+
+// Status 返回池内所有账号的运行时状态。
+func (p *Pool) Status() []SlotStatus {
+	if p == nil {
+		return nil
+	}
+	out := []SlotStatus{}
+	for _, s := range p.snapshot() {
+		out = append(out, s.Status())
+	}
+	return out
+}

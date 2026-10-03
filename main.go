@@ -127,6 +127,8 @@ func main() {
 	mux.HandleFunc("/api/oauth/wait", handleOAuthWait)
 	mux.HandleFunc("/api/oauth/cancel", handleOAuthCancel)
 	mux.HandleFunc("/api/active", handleSetActiveAccount)
+	mux.HandleFunc("/api/pool", handlePoolStatus)
+	mux.HandleFunc("/api/pool/cool", handlePoolCool)
 	mux.HandleFunc("/api/settings", handleGetSettings)
 	mux.HandleFunc("/api/settings/save", handleSaveSettings)
 	mux.HandleFunc("/api/models", handleListModels)
@@ -383,6 +385,31 @@ func handleSetActiveAccount(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if err := svc.SetActiveAccount(req.ID); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]bool{"ok": true})
+}
+
+func handlePoolStatus(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]interface{}{"slots": svc.PoolStatus()})
+}
+
+func handlePoolCool(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPost {
+		writeError(w, http.StatusMethodNotAllowed, fmt.Errorf("POST required"))
+		return
+	}
+	var req struct {
+		ID      string `json:"id"`
+		Seconds int    `json:"seconds"`
+		Reason  string `json:"reason"`
+	}
+	if err := readJSON(r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, err)
+		return
+	}
+	if err := svc.CoolAccount(req.ID, req.Seconds, req.Reason); err != nil {
 		writeError(w, http.StatusBadRequest, err)
 		return
 	}

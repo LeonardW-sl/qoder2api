@@ -29,6 +29,7 @@ type QoderModel struct {
 
 type Service struct {
 	bridge      *bridge.Bridge
+	pool        *bridge.Pool
 	bridgeSrv   *http.Server
 	bridgeMu    sync.Mutex
 	bridgePort  int
@@ -180,6 +181,7 @@ func (s *Service) StopBridge() error {
 	err := s.bridgeSrv.Close()
 	s.bridgeSrv = nil
 	s.bridge = nil
+	s.pool = nil
 	return err
 }
 
@@ -253,6 +255,7 @@ func (s *Service) startBridgeWithAccount(acct *account.Account) error {
 
 	s.bridgeMu.Lock()
 	s.bridge = b
+	s.pool = pool
 	s.bridgeSrv = srv
 	s.bridgeMu.Unlock()
 
@@ -292,6 +295,38 @@ func (s *Service) buildAccountPool() *bridge.Pool {
 		logger.Info("buildAccountPool: added account %s (region=%s)", a.Name, a.Region)
 	}
 	return pool
+}
+
+// PoolStatus 返回账号池运行时状态（桥未启动时为空）。
+func (s *Service) PoolStatus() []bridge.SlotStatus {
+	s.bridgeMu.Lock()
+	pool := s.pool
+	s.bridgeMu.Unlock()
+	if pool == nil {
+		return nil
+	}
+	return pool.Status()
+}
+
+// CoolAccount 手动冷却指定账号（运维/调试用，便于观察选号与换号）。
+func (s *Service) CoolAccount(id string, seconds int, reason string) error {
+	s.bridgeMu.Lock()
+	pool := s.pool
+	s.bridgeMu.Unlock()
+	if pool == nil {
+		return fmt.Errorf("bridge not running")
+	}
+	if strings.TrimSpace(id) == "" {
+		return fmt.Errorf("id required")
+	}
+	if seconds <= 0 {
+		seconds = 60
+	}
+	if strings.TrimSpace(reason) == "" {
+		reason = "manual cooldown"
+	}
+	pool.Cool(id, time.Duration(seconds)*time.Second, reason)
+	return nil
 }
 
 func (s *Service) GetSettings() (*account.Settings, error) {
