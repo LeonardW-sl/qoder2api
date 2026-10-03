@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"path/filepath"
 	"strings"
 	"sync"
 	"time"
@@ -271,7 +272,7 @@ func (s *Service) startBridgeWithAccount(acct *account.Account) error {
 // buildAccountPool 把所有有 secret 的账号建成运行时账号池。
 // 单个账号建会话失败（凭证失效/网络等）只跳过该账号，不阻断整池启动。
 func (s *Service) buildAccountPool() *bridge.Pool {
-	pool := bridge.NewPool()
+	pool := bridge.NewPoolWithState(filepath.Join(account.DataRoot(), "pool_state.json"))
 	accounts, err := account.List()
 	if err != nil {
 		logger.Error("buildAccountPool: list accounts: %v", err)
@@ -294,6 +295,8 @@ func (s *Service) buildAccountPool() *bridge.Pool {
 		pool.Add(slot)
 		logger.Info("buildAccountPool: added account %s (region=%s)", a.Name, a.Region)
 	}
+	// 账号全部入池后再恢复冷却状态（构造时空池 load 匹配不到 ID）。
+	pool.LoadState()
 	return pool
 }
 

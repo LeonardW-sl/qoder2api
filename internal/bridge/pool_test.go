@@ -215,3 +215,18 @@ func TestNoAccountErrorMapsTo503(t *testing.T) {
 		t.Errorf("FriendlyError(ErrNoAccount) = (%q, %q)", msg, typ)
 	}
 }
+
+func TestCooldownForRetryAfterSeconds(t *testing.T) {
+	detail := `{"code":"403","message":"{\"code\":\"10605\",\"retryAfterSeconds\":30}"}`
+	if got := CooldownFor(NewUpstreamError(403, detail)); got != 30*time.Second {
+		t.Errorf("retryAfterSeconds=30 -> %v, want 30s", got)
+	}
+	if got := CooldownFor(NewUpstreamError(403, `{"code":"112"}`)); got != CooldownQuota {
+		t.Errorf("plain 403 -> %v, want %v", got, CooldownQuota)
+	}
+	// 超大值被截到 5 分钟
+	big := `{"retryAfterSeconds":99999}`
+	if got := CooldownFor(NewUpstreamError(403, big)); got != 5*time.Minute {
+		t.Errorf("huge retryAfter -> %v, want 5m", got)
+	}
+}

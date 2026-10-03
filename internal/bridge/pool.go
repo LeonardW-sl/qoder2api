@@ -1,8 +1,11 @@
 package bridge
 
 import (
+	"encoding/json"
 	"errors"
 	"net/http"
+	"os"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -72,12 +75,98 @@ func (s *Slot) noteSuccess() {
 
 // Pool 是账号池：轮询选号，跳过冷却中与已试过的账号。
 type Pool struct {
-	mu     sync.Mutex
-	slots  []*Slot
-	cursor int
+	mu        sync.Mutex
+	slots     []*Slot
+	cursor    int
+	statePath string // 非空时把冷却状态持久化到该文件（重启不丢）
 }
 
 func NewPool(slots ...*Slot) *Pool { return &Pool{slots: slots} }
+
+// NewPoolWithState 创建带持久化的账号池：先从 statePath 载入冷却状态，
+// 之后每次冷却 / 恢复都会写回，使重启不丢失冷却（避免重启后立刻再撞
+// 已知失效的账号）。
+func NewPoolWithState(statePath string, slots ...*Slot) *Pool {
+	p := &Pool{slots: slots, statePath: statePath}
+	p.load()
+	return p
+}
+
+// poolState 是落盘的池状态（仅保存需要跨重启保留的字段）。
+type poolState struct {
+	Slots map[string]slotState `json:"slots"`
+}
+
+type slotState struct {
+	CooldownUntil time.Time `json:"cooldown_until"`
+	LastError     string    `json:"last_error,omitempty"`
+}
+
+// LoadState 从磁盘恢复冷却状态。必须在账号全部 Add 之后调用——
+// 构造时空池 load 匹配不到任何 ID（这正是先前重启丢冷却的原因）。
+func (p *Pool) LoadState() { p.load() }
+
+// load 从磁盘恢复冷却状态（仅恢复尚未过期的冷却）。
+func (p *Pool) load() {
+	if p == nil || p.statePath == "" {
+		return
+	}
+	data, err := os.ReadFile(p.statePath)
+	if err != nil {
+		return
+	}
+	var st poolState
+	if json.Unmarshal(data, &st) != nil {
+		return
+	}
+	now := time.Now()
+	restored := 0
+	for _, s := range p.snapshot() {
+		e, ok := st.Slots[s.ID]
+		if !ok {
+			continue
+		}
+		s.mu.Lock()
+		if e.CooldownUntil.After(now) {
+			s.cooldownUntil = e.CooldownUntil
+			restored++
+		}
+		s.lastErr = e.LastError
+		s.mu.Unlock()
+	}
+	if restored > 0 {
+		logger.Info("pool: restored %d cooling account(s) from %s", restored, p.statePath)
+	}
+}
+
+// save 原子写回池状态（临时文件 + rename）。
+func (p *Pool) save() {
+	if p == nil || p.statePath == "" {
+		return
+	}
+	st := poolState{Slots: map[string]slotState{}}
+	for _, s := range p.snapshot() {
+		s.mu.Lock()
+		until := s.cooldownUntil
+		lastErr := s.lastErr
+		s.mu.Unlock()
+		if !until.IsZero() || lastErr != "" {
+			st.Slots[s.ID] = slotState{CooldownUntil: until, LastError: lastErr}
+		}
+	}
+	data, err := json.MarshalIndent(st, "", "  ")
+	if err != nil {
+		return
+	}
+	tmp := p.statePath + ".tmp"
+	if err := os.WriteFile(tmp, data, 0600); err != nil {
+		logger.Error("pool: save state: %v", err)
+		return
+	}
+	if err := os.Rename(tmp, p.statePath); err != nil {
+		logger.Error("pool: rename state: %v", err)
+	}
+}
 
 func (p *Pool) Add(s *Slot) {
 	if p == nil {
@@ -143,6 +232,7 @@ func (p *Pool) Cool(id string, d time.Duration, reason string) {
 		if s.ID == id {
 			s.cool(d, reason)
 			logger.Info("pool: account %s cooled for %s (%s)", id, d, reason)
+			p.save()
 			return
 		}
 	}
@@ -153,6 +243,7 @@ func (p *Pool) NoteSuccess(id string) {
 	for _, s := range p.snapshot() {
 		if s.ID == id {
 			s.noteSuccess()
+			p.save()
 			return
 		}
 	}
@@ -204,6 +295,11 @@ func isAccountExhaustedDetail(detail string) bool {
 func CooldownFor(err error) time.Duration {
 	var ue *UpstreamError
 	if errors.As(err, &ue) {
+		// 上游给了明确重试时间（如 10605 排队 retryAfterSeconds）时优先用它，
+		// 上限 5 分钟，避免异常大值把账号长期雪藏。
+		if d, ok := retryAfterFromDetail(ue.Detail); ok {
+			return d
+		}
 		switch {
 		case ue.Status == http.StatusUnauthorized || ue.Status == http.StatusForbidden:
 			return CooldownQuota
@@ -214,6 +310,38 @@ func CooldownFor(err error) time.Duration {
 		}
 	}
 	return CooldownTransient
+}
+
+// retryAfterFromDetail 从上游详情解析 retryAfterSeconds（10605 排队等场景）。
+func retryAfterFromDetail(detail string) (time.Duration, bool) {
+	idx := strings.Index(detail, "retryAfterSeconds")
+	if idx < 0 {
+		return 0, false
+	}
+	rest := detail[idx+len("retryAfterSeconds"):]
+	start := -1
+	for i := 0; i < len(rest); i++ {
+		if rest[i] >= '0' && rest[i] <= '9' {
+			start = i
+			break
+		}
+	}
+	if start < 0 {
+		return 0, false
+	}
+	end := start
+	for end < len(rest) && rest[end] >= '0' && rest[end] <= '9' {
+		end++
+	}
+	n, err := strconv.Atoi(rest[start:end])
+	if err != nil || n <= 0 {
+		return 0, false
+	}
+	d := time.Duration(n) * time.Second
+	if d > 5*time.Minute {
+		d = 5 * time.Minute
+	}
+	return d, true
 }
 
 // SlotStatus 是给控制台/运维看的账号池运行时状态。
