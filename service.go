@@ -219,12 +219,6 @@ func (s *Service) authMiddleware(next http.Handler) http.Handler {
 }
 
 func (s *Service) startBridgeWithAccount(acct *account.Account) error {
-	logger.Info("startBridgeWithAccount: account=%s", acct.Name)
-	pat, err := account.GetSecret(acct.ID)
-	if err != nil {
-		return fmt.Errorf("failed to get secret: %w", err)
-	}
-
 	tmpl := string(s.basePrompt)
 	for _, ukey := range []string{"{UUID1}", "{UUID2}", "{UUID3}", "{UUID4}", "{UUID5}"} {
 		tmpl = strings.ReplaceAll(tmpl, ukey, cosy.NewUUID())
@@ -233,10 +227,15 @@ func (s *Service) startBridgeWithAccount(acct *account.Account) error {
 	var templateBase map[string]interface{}
 	_ = json.Unmarshal([]byte(tmpl), &templateBase)
 
-	b, err := bridge.NewBridge(pat, acct.Region, templateBase)
-	if err != nil {
-		return fmt.Errorf("failed to create bridge: %w", err)
+	// 账号池：把所有有凭证的账号都纳入。请求时轮询选号，某个账号限额/限流/
+	// 瞬时故障时冷却该账号并自动换下一个（见 internal/bridge/pool.go）。
+	pool := s.buildAccountPool()
+	if pool.Size() == 0 {
+		return fmt.Errorf("no account with usable secret; please OAuth/PAT login in web console")
 	}
+	logger.Info("startBridgeWithAccount: pool size=%d (requested active=%s)", pool.Size(), acct.Name)
+
+	b := bridge.NewPoolBridge(pool, templateBase)
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/v1/chat/completions", b.HandleChatCompletions)
@@ -264,6 +263,35 @@ func (s *Service) startBridgeWithAccount(acct *account.Account) error {
 		}
 	}()
 	return nil
+}
+
+// buildAccountPool 把所有有 secret 的账号建成运行时账号池。
+// 单个账号建会话失败（凭证失效/网络等）只跳过该账号，不阻断整池启动。
+func (s *Service) buildAccountPool() *bridge.Pool {
+	pool := bridge.NewPool()
+	accounts, err := account.List()
+	if err != nil {
+		logger.Error("buildAccountPool: list accounts: %v", err)
+		return pool
+	}
+	for _, a := range accounts {
+		if !account.HasSecret(a.ID) {
+			continue
+		}
+		pat, err := account.GetSecret(a.ID)
+		if err != nil {
+			logger.Error("buildAccountPool: get secret for %s: %v", a.Name, err)
+			continue
+		}
+		slot, err := bridge.NewSlotFromSecret(a.ID, a.Name, a.Region, pat)
+		if err != nil {
+			logger.Error("buildAccountPool: account %s unusable, skipped: %v", a.Name, err)
+			continue
+		}
+		pool.Add(slot)
+		logger.Info("buildAccountPool: added account %s (region=%s)", a.Name, a.Region)
+	}
+	return pool
 }
 
 func (s *Service) GetSettings() (*account.Settings, error) {
