@@ -18,8 +18,18 @@ import (
 	"qoder2api/logger"
 )
 
-// checkinHost 是签到 API 域名（抓包确认为 openapi.qoder.com.cn）
+// checkinHost 是签到 API 的兜底域名（国内）。国际走 openapi.qoder.sh，
+// 由 checkinHostFor 按账号区域选择——此前写死国内域名导致国际号签到
+// 返回 401 TOKEN_EXPIRE（拿国际 token 打国内端点）。
 const checkinHost = "openapi.qoder.com.cn"
+
+// checkinHostFor 返回该区域的签到/OpenAPI 主机。
+func checkinHostFor(region account.Region) string {
+	if h := account.GetEndpoints(region).OpenAPIHost; h != "" {
+		return h
+	}
+	return checkinHost
+}
 
 // CheckinResult 单个账号的签到结果
 type CheckinResult struct {
@@ -70,8 +80,11 @@ func checkinHeaders(deviceToken string) map[string]string {
 
 // doCheckinRequest 发送签到相关请求，返回 (httpStatus, parsedJSON, rawBody)
 // reqBody 为 nil 时发送空 body（抓包确认 campaigns/claim 即为空 body）
-func doCheckinRequest(method, path, deviceToken string, reqBody interface{}) (int, interface{}, string) {
-	url := "https://" + checkinHost + path
+func doCheckinRequest(method, path, deviceToken string, reqBody interface{}, host string) (int, interface{}, string) {
+	if host == "" {
+		host = checkinHost
+	}
+	url := "https://" + host + path
 
 	var body io.Reader
 	var bodyBytes []byte
@@ -87,7 +100,7 @@ func doCheckinRequest(method, path, deviceToken string, reqBody interface{}) (in
 		req.Header.Set(k, v)
 	}
 	if method == "POST" {
-		req.Header.Set("origin", "https://"+checkinHost)
+		req.Header.Set("origin", "https://"+host)
 		if reqBody == nil {
 			req.ContentLength = 0 // 抓包确认 claim 无 body
 		}
@@ -307,10 +320,11 @@ func checkinAccount(acct *account.Account) CheckinResult {
 	// ========== 权威领取：campaigns 流程（真实发放积分的系统） ==========
 	// 注意：不走 daily-check-in/claim —— 该 legacy 端点已 DISABLED，
 	// 却对未领取日也恒返回 409，会误判"已领取"导致跳过真实领取（实测 2026-09-21 不发积分）
-	r := campaignsCheckin(deviceToken, &res)
+	host := checkinHostFor(acct.Region)
+	r := campaignsCheckin(deviceToken, &res, host)
 
 	// 只读补充 legacy 统计（DISABLED 时恒 0，不影响结果；上游恢复后可提供 streak）
-	readDailyCheckinStats(deviceToken, &r)
+	readDailyCheckinStats(deviceToken, &r, host)
 
 	return finalizeCheckin(acct.ID, r)
 }
@@ -341,8 +355,8 @@ func finalizeCheckin(accountID string, r CheckinResult) CheckinResult {
 // 背景：该端点的 legacy 活动已 DISABLED，claim 会恒返回 409 造成误判，
 // 且不发放任何积分（2026-09-21 实测）。真实领取只走 campaigns 流程。
 // 上游恢复后若返回非 0 统计，可作为 streak 的补充数据源。
-func readDailyCheckinStats(deviceToken string, res *CheckinResult) {
-	status, body, raw := doCheckinRequest("GET", "/sash/api/v1/me/daily-check-in/status", deviceToken, nil)
+func readDailyCheckinStats(deviceToken string, res *CheckinResult, host string) {
+	status, body, raw := doCheckinRequest("GET", "/sash/api/v1/me/daily-check-in/status", deviceToken, nil, host)
 	if status != 200 {
 		if status != 404 && status != 401 {
 			logger.Info("[Checkin] daily-check-in/status HTTP %d: %s", status, truncate(raw, 150))
@@ -408,9 +422,9 @@ func windowHint(res *CheckinResult, fallback string) string {
 }
 
 // campaignsCheckin 兜底：走桌面端抓包还原的 campaigns 流程
-func campaignsCheckin(deviceToken string, res *CheckinResult) CheckinResult {
+func campaignsCheckin(deviceToken string, res *CheckinResult, host string) CheckinResult {
 	// Step 1: 查询活动列表
-	status, body, raw := doCheckinRequest("GET", "/sash/api/v1/me/campaigns", deviceToken, nil)
+	status, body, raw := doCheckinRequest("GET", "/sash/api/v1/me/campaigns", deviceToken, nil, host)
 	if status != 200 {
 		res.Message = fmt.Sprintf("查询活动失败 HTTP %d: %s", status, truncate(raw, 300))
 		return *res
@@ -473,7 +487,7 @@ func campaignsCheckin(deviceToken string, res *CheckinResult) CheckinResult {
 
 	// Step 2: 领取（空 body，抓包确认）
 	claimPath := fmt.Sprintf("/sash/api/v1/me/campaigns/%s/claim", target.CampaignID)
-	status, body, raw = doCheckinRequest("POST", claimPath, deviceToken, nil)
+	status, body, raw = doCheckinRequest("POST", claimPath, deviceToken, nil, host)
 	if status != 200 {
 		res.Message = fmt.Sprintf("领取失败 HTTP %d: %s", status, truncate(raw, 300))
 		return *res

@@ -39,3 +39,12 @@ func TestCheckinTimesDefaultAndConfigured(t *testing.T) {
 		t.Errorf("configured = %v, want [09:15 17:00]", got)
 	}
 }
+
+func TestCheckinHostForRegion(t *testing.T) {
+	if got := checkinHostFor(account.RegionCN); got != "openapi.qoder.com.cn" {
+		t.Errorf("cn host = %q", got)
+	}
+	if got := checkinHostFor(account.RegionGlobal); got != "openapi.qoder.sh" {
+		t.Errorf("global host = %q", got)
+	}
+}
