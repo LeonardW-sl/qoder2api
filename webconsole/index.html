@@ -514,10 +514,11 @@
         const cachedQuota = quotaCache[a.id];
         const slot = poolById[a.id];
         const coolMs = slot ? (slot.cooling_remaining_ms || 0) : 0;
-        const poolBadge = __omp_shell("slot ? ''")
-          : coolMs > 0
+        const poolBadge = slot
+          ? (coolMs > 0
             ? `<span class="pill" style="border-color:#e6b800;background:#fff8e1;color:#8a6d00">冷却中 ${fmtDur(coolMs)}</span>`
-            : `<span class="pill" style="border-color:#8bc34a;background:#f1f8e9;color:#33691e">可用</span>`;
+            : `<span class="pill" style="border-color:#8bc34a;background:#f1f8e9;color:#33691e">可用</span>`)
+          : '';
         const poolNote = (slot && coolMs > 0 && slot.last_error)
           ? `<div class="muted" style="font-size:11px">${slot.last_error}</div>` : '';
         return `
