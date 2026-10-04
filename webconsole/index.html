@@ -224,8 +224,10 @@
         <button id="checkinBtn">🎁 每日签到领 100 Credits</button>
         <label class="pill" style="cursor:pointer; margin-bottom:0">
           <input type="checkbox" id="autoCheckinToggle" style="width:auto; margin-right:6px">
-          每日 10:00 自动签到
+          自动签到
         </label>
+        <input id="autoCheckinTimes" placeholder="09:15,17:00" style="width:150px" title="每天自动签到的时间，逗号分隔，HH:MM；留空=10:00">
+        <button class="secondary" id="autoCheckinTimesSave">保存时间</button>
         <span class="msg" id="checkinMsg"></span>
       </div>
       <div id="checkinResult" style="margin-bottom:12px; display:none">
@@ -378,6 +380,9 @@
         if (document.activeElement !== $('autoCheckinToggle')) {
           $('autoCheckinToggle').checked = !!st.auto_checkin;
         }
+        if (document.activeElement !== $('autoCheckinTimes')) {
+          $('autoCheckinTimes').value = (st.auto_checkin_times || []).join(',');
+        }
       } catch (e) {
         fillConnection({}, {});
         $('connMsg').className = 'msg err';
@@ -396,9 +401,28 @@
           body: JSON.stringify({ auto_checkin: enabled }),
         });
         $('checkinMsg').className = 'msg ok';
-        $('checkinMsg').textContent = enabled ? '✅ 自动签到已开启（每日 10:00）' : '自动签到已关闭';
+        $('checkinMsg').textContent = enabled ? '✅ 自动签到已开启' : '自动签到已关闭';
       } catch (e) {
         ev.target.checked = !enabled;
+        $('checkinMsg').className = 'msg err';
+        $('checkinMsg').textContent = e.message;
+      }
+    };
+
+    // 自动签到时间保存
+    $('autoCheckinTimesSave').onclick = async () => {
+      const raw = ($('autoCheckinTimes').value || '').trim();
+      const times = raw ? raw.split(',').map(s => s.trim()).filter(s => s) : [];
+      $('checkinMsg').className = 'msg';
+      $('checkinMsg').textContent = '保存中...';
+      try {
+        await api('/api/settings/save', {
+          method: 'POST',
+          body: JSON.stringify({ auto_checkin_times: times }),
+        });
+        $('checkinMsg').className = 'msg ok';
+        $('checkinMsg').textContent = times.length ? ('✅ 签到时间已设为 ' + times.join(' / ')) : '✅ 已恢复默认（10:00）';
+      } catch (e) {
         $('checkinMsg').className = 'msg err';
         $('checkinMsg').textContent = e.message;
       }

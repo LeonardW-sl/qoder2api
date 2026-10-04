@@ -445,12 +445,13 @@ func handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var req struct {
-		Port            *int    `json:"port"`
-		BridgeToken     *string `json:"bridge_token"`
-		LogLevel        *string `json:"log_level"`
-		AutoStart       *bool   `json:"auto_start"`
-		AutoCheckin     *bool   `json:"auto_checkin"`
-		ConsolePassword *string `json:"console_password"`
+		Port             *int     `json:"port"`
+		BridgeToken      *string  `json:"bridge_token"`
+		LogLevel         *string  `json:"log_level"`
+		AutoStart        *bool    `json:"auto_start"`
+		AutoCheckin      *bool    `json:"auto_checkin"`
+		AutoCheckinTimes []string `json:"auto_checkin_times"`
+		ConsolePassword  *string  `json:"console_password"`
 		// 新格式：包含旧密码和新密码
 		ConsolePasswordNew *struct {
 			OldPassword string  `json:"old_password"`
@@ -489,6 +490,22 @@ func handleSaveSettings(w http.ResponseWriter, r *http.Request) {
 	if req.AutoCheckin != nil {
 		cur.AutoCheckin = *req.AutoCheckin
 		logger.Info("auto checkin set to %v", cur.AutoCheckin)
+	}
+	if req.AutoCheckinTimes != nil {
+		var times []string
+		for _, t := range req.AutoCheckinTimes {
+			t = strings.TrimSpace(t)
+			if t == "" {
+				continue
+			}
+			if _, _, ok := parseHHMM(t); !ok {
+				writeError(w, http.StatusBadRequest, fmt.Errorf("invalid auto_checkin_times entry: %q (want HH:MM)", t))
+				return
+			}
+			times = append(times, t)
+		}
+		cur.AutoCheckinTimes = times
+		logger.Info("auto checkin times set to %v", times)
 	}
 
 	// 处理新格式的密码修改

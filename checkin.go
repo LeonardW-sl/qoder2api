@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -600,15 +602,40 @@ func handleCheckin(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
-// ---------- 每日 10:00 自动签到调度 ----------
+// ---------- 每日自动签到调度 ----------
 
 var (
-	checkinMu      sync.Mutex
-	lastCheckinDay string // 最近一次自动签到的日期 (YYYY-MM-DD)，防止同日重复
+	checkinMu   sync.Mutex
+	checkinDone = map[string]bool{} // key: "YYYY-MM-DD HH:MM"，当日该时段已执行
 )
 
-// StartCheckinScheduler 启动后台调度器（非阻塞）
-// 每分钟检查一次：若开关开启且当前时间 >= 当日 10:00 且当日未执行，则自动签到
+// defaultCheckinTimes 未配置时的默认签到时间（保持原行为）。
+var defaultCheckinTimes = []string{"10:00"}
+
+// CheckinTimes 返回生效的自动签到时间列表（HH:MM）。
+func CheckinTimes(settings *account.Settings) []string {
+	if settings != nil && len(settings.AutoCheckinTimes) > 0 {
+		return settings.AutoCheckinTimes
+	}
+	return defaultCheckinTimes
+}
+
+// parseHHMM 解析 "09:15" → (9, 15, true)
+func parseHHMM(s string) (int, int, bool) {
+	parts := strings.Split(strings.TrimSpace(s), ":")
+	if len(parts) != 2 {
+		return 0, 0, false
+	}
+	h, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+	m, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+	if err1 != nil || err2 != nil || h < 0 || h > 23 || m < 0 || m > 59 {
+		return 0, 0, false
+	}
+	return h, m, true
+}
+
+// StartCheckinScheduler 启动后台调度器（非阻塞）。每分钟检查一次：对每个配置的
+// 时间点，若开关开启、当前已过该点、且当日该点尚未执行，则自动签到。
 func StartCheckinScheduler() {
 	go func() {
 		ticker := time.NewTicker(time.Minute)
@@ -617,60 +644,63 @@ func StartCheckinScheduler() {
 			runScheduledCheckin()
 		}
 	}()
-	logger.Info("auto checkin scheduler started (daily 10:00, default off)")
+	logger.Info("auto checkin scheduler started (times=%s, default off)", strings.Join(CheckinTimes(nil), ","))
 }
 
-// runScheduledCheckin 执行一次调度检查（可手动调用测试）
+// runScheduledCheckin 执行一次调度检查（可手动调用测试）。
 func runScheduledCheckin() bool {
-	// 读取开关（默认关闭）
 	settings, err := account.LoadSettings()
-	if err != nil || settings == nil {
+	if err != nil || settings == nil || !settings.AutoCheckin {
 		return false
 	}
-	if !settings.AutoCheckin {
-		return false
-	}
-
 	now := time.Now()
-	today := now.Format("2006-01-02")
+	date := now.Format("2006-01-02")
+	nowMin := now.Hour()*60 + now.Minute()
 
-	// 必须已过 10:00
-	if now.Hour() < 10 {
-		return false
-	}
-
-	checkinMu.Lock()
-	defer checkinMu.Unlock()
-
-	// 当日已执行过
-	if lastCheckinDay == today {
-		return false
-	}
-
-	logger.Info("[Checkin] auto checkin triggered at %s", now.Format("15:04:05"))
-	results := CheckinAll()
-
-	claimed, already, retryable := 0, 0, 0
-	for _, r := range results {
-		switch r.Status {
-		case checkinStatusClaimed:
-			claimed++
-		case checkinStatusAlreadyClaimed:
-			already++
-		case checkinStatusError, checkinStatusNoCampaign, checkinStatusNoToken:
-			// 可能活动尚未创建（10:00 整点服务器有延迟）→ 允许重试
-			retryable++
+	ran := false
+	for _, t := range CheckinTimes(settings) {
+		h, m, ok := parseHHMM(t)
+		if !ok {
+			logger.Error("[Checkin] invalid auto checkin time %q, skipped", t)
+			continue
 		}
-	}
+		slotMin := h*60 + m
+		if nowMin < slotMin {
+			continue // 还没到点
+		}
+		key := date + " " + t
+		checkinMu.Lock()
+		done := checkinDone[key]
+		checkinMu.Unlock()
+		if done {
+			continue
+		}
 
-	// 标记当日完成的条件：无可重试状态；或已过 12:00（兜底不再重试，避免无限轮询）
-	if retryable == 0 || now.Hour() >= 12 {
-		lastCheckinDay = today
-		logger.Info("[Checkin] auto checkin finished: %d claimed, %d already, %d retryable, total %d",
-			claimed, already, retryable, len(results))
-	} else {
-		logger.Info("[Checkin] auto checkin partial: %d claimed, %d already, %d retryable -> will retry next tick",
-			claimed, already, retryable)
+		logger.Info("[Checkin] auto checkin triggered at %s (slot %s)", now.Format("15:04:05"), t)
+		results := CheckinAll()
+		claimed, already, retryable := 0, 0, 0
+		for _, r := range results {
+			switch r.Status {
+			case checkinStatusClaimed:
+				claimed++
+			case checkinStatusAlreadyClaimed:
+				already++
+			case checkinStatusError, checkinStatusNoCampaign, checkinStatusNoToken:
+				retryable++
+			}
+		}
+		checkinMu.Lock()
+		if retryable == 0 || nowMin >= slotMin+120 {
+			// 无可重试状态，或已过该时段 2 小时（兜底，避免无限轮询）
+			checkinDone[key] = true
+			logger.Info("[Checkin] slot %s finished: %d claimed, %d already, %d retryable, total %d",
+				t, claimed, already, retryable, len(results))
+		} else {
+			logger.Info("[Checkin] slot %s partial: %d claimed, %d already, %d retryable -> retry next tick",
+				t, claimed, already, retryable)
+		}
+		checkinMu.Unlock()
+		ran = true
 	}
-	return true
+	return ran
 }
