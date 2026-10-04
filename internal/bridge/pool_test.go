@@ -230,3 +230,42 @@ func TestCooldownForRetryAfterSeconds(t *testing.T) {
 		t.Errorf("huge retryAfter -> %v, want 5m", got)
 	}
 }
+
+func TestPickSlotForModelRoutesByRegion(t *testing.T) {
+	cn := testSlot(t, "cn-slot", "t")
+	cn.catalog = map[string]bool{"gmodel": true, "qfmodel": true}
+	cn.catalogAt = time.Now()
+	gl := testSlot(t, "global-slot", "t")
+	gl.catalog = map[string]bool{"qfmodel": true, "ultimate": true}
+	gl.catalogAt = time.Now()
+
+	br := NewPoolBridge(NewPool(cn, gl), nil)
+
+	// 区域独占模型 → 必须落到能提供它的区域
+	for i := 0; i < 3; i++ {
+		s, ok := br.pickSlotForModel("gmodel", nil)
+		if !ok || s.ID != "cn-slot" {
+			t.Fatalf("gmodel should route to cn-slot, got %v", s)
+		}
+		s, ok = br.pickSlotForModel("ultimate", nil)
+		if !ok || s.ID != "global-slot" {
+			t.Fatalf("ultimate should route to global-slot, got %v", s)
+		}
+	}
+
+	// 两区都有的模型 → 轮询两区
+	seen := map[string]bool{}
+	for i := 0; i < 4; i++ {
+		if s, ok := br.pickSlotForModel("qfmodel", nil); ok {
+			seen[s.ID] = true
+		}
+	}
+	if !seen["cn-slot"] || !seen["global-slot"] {
+		t.Fatalf("qfmodel should rotate across both regions, seen=%v", seen)
+	}
+
+	// 谁都不认识的模型 → 兜底任意可用账号
+	if s, ok := br.pickSlotForModel("nobody-has-this", nil); !ok || s == nil {
+		t.Fatalf("unknown model should fall back to any slot, got %v", s)
+	}
+}

@@ -44,6 +44,11 @@ type Slot struct {
 	mu            sync.Mutex
 	cooldownUntil time.Time
 	lastErr       string
+
+	// 该账号所在区域的可用模型目录缓存（用于按模型路由到正确区域）。
+	catalogMu sync.Mutex
+	catalog   map[string]bool
+	catalogAt time.Time
 }
 
 // NewSlot 组装一个池内账号。
@@ -198,29 +203,40 @@ func (p *Pool) snapshot() []*Slot {
 	return out
 }
 
-// Pick 从轮询游标开始扫描，返回第一个既未冷却也不在 exclude 中的账号。
-func (p *Pool) Pick(exclude map[string]struct{}) (*Slot, bool) {
+// Pick 从轮询游标开始扫描，返回第一个「未冷却、不在 exclude 中、且满足
+// 可选 filter」的账号。filter 在锁外调用（允许其中做缓存/网络操作）。
+func (p *Pool) Pick(exclude map[string]struct{}, filters ...func(*Slot) bool) (*Slot, bool) {
 	if p == nil {
 		return nil, false
 	}
-	p.mu.Lock()
-	defer p.mu.Unlock()
-	n := len(p.slots)
+	var filter func(*Slot) bool
+	if len(filters) > 0 {
+		filter = filters[0]
+	}
+	slots := p.snapshot()
+	n := len(slots)
 	if n == 0 {
 		return nil, false
 	}
-	now := time.Now()
+	p.mu.Lock()
 	start := p.cursor
+	p.mu.Unlock()
+	now := time.Now()
 	for i := 0; i < n; i++ {
 		idx := (start + i) % n
-		s := p.slots[idx]
+		s := slots[idx]
 		if _, skip := exclude[s.ID]; skip {
 			continue
 		}
 		if !s.available(now) {
 			continue
 		}
+		if filter != nil && !filter(s) {
+			continue
+		}
+		p.mu.Lock()
 		p.cursor = (idx + 1) % n
+		p.mu.Unlock()
 		return s, true
 	}
 	return nil, false

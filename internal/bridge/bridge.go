@@ -415,7 +415,7 @@ func (b *Bridge) CallQoderWithOpts(ctx context.Context, agent string, messages [
 	tried := make(map[string]struct{})
 	var lastErr error
 	for {
-		slot, ok := b.pickSlot(tried)
+		slot, ok := b.pickSlotForModel(model, tried)
 		if !ok {
 			break
 		}

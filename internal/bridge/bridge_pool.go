@@ -61,3 +61,64 @@ func (b *Bridge) noteSlotSuccess(id string) {
 		b.pool.NoteSuccess(id)
 	}
 }
+
+// --- 按模型区域路由 ---------------------------------------------------------
+// 混合国内/国际账号时，区域独占模型只能由对应区域的账号提供。这里缓存每个
+// 账号所在区域的模型目录，选号时优先选「目录里有该模型」的账号；目录未知或
+// 拉取失败则不参与过滤（保持宽松，避免误伤）。
+
+const modelCatalogTTL = 30 * time.Minute
+
+// ensureCatalog 确保账号的模型目录缓存新鲜。失败也记时间戳，避免每请求重试。
+func (b *Bridge) ensureCatalog(slot *Slot) {
+	slot.catalogMu.Lock()
+	fresh := !slot.catalogAt.IsZero() && time.Since(slot.catalogAt) < modelCatalogTTL
+	slot.catalogMu.Unlock()
+	if fresh {
+		return
+	}
+	models, err := b.fetchSlotModels(slot)
+	slot.catalogMu.Lock()
+	slot.catalogAt = time.Now()
+	if err == nil && len(models) > 0 {
+		set := make(map[string]bool, len(models))
+		for _, m := range models {
+			set[m.Key] = true
+		}
+		slot.catalog = set
+	}
+	slot.catalogMu.Unlock()
+}
+
+func (b *Bridge) fetchSlotModels(slot *Slot) ([]QoderModel, error) {
+	resp, err := slot.client.callGet(qoderModelListURL(slot.Region))
+	if err != nil {
+		return nil, err
+	}
+	return parseQoderModels(resp), nil
+}
+
+// slotSupportsModel 该账号能否提供此模型；目录未知时返回 true（不过滤）。
+func (b *Bridge) slotSupportsModel(slot *Slot, model string) bool {
+	slot.catalogMu.Lock()
+	defer slot.catalogMu.Unlock()
+	if slot.catalog == nil {
+		return true
+	}
+	return slot.catalog[model]
+}
+
+// pickSlotForModel 按模型选号：优先选目录里有该模型的账号；都没有则退回任意可用账号。
+func (b *Bridge) pickSlotForModel(model string, exclude map[string]struct{}) (*Slot, bool) {
+	if b.pool == nil {
+		return b.pickSlot(exclude)
+	}
+	slot, ok := b.pool.Pick(exclude, func(s *Slot) bool {
+		b.ensureCatalog(s)
+		return b.slotSupportsModel(s, model)
+	})
+	if ok {
+		return slot, true
+	}
+	return b.pool.Pick(exclude)
+}
